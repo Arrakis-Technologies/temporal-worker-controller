@@ -57,6 +57,15 @@ affinity: {}
 # More than one replica is required for high availability.
 replicas: 2
 
+# Maximum number of WorkerDeployment reconciliations allowed to call Temporal
+# concurrently. Lower this when recovering a large backlog against a constrained
+# Temporal cluster.
+maxConcurrentReconciles: 100
+
+# Interval between successful WorkerDeployment reconciliations. Increase this
+# when recovering a large resource set against a constrained Temporal cluster.
+reconcileInterval: 10s
+
 # deprecated. disable authenticated metrics endpoint access with the
 # metrics.disableAuth value.
 authProxy:

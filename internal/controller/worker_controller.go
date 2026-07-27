@@ -93,6 +93,16 @@ type WorkerDeploymentReconciler struct {
 	// Disables panic recovery if true
 	DisableRecoverPanic bool
 
+	// MaxConcurrentReconciles bounds the number of WorkerDeployment reconciliations
+	// that may call Temporal concurrently. Values less than one use
+	// DefaultMaxConcurrentReconciles.
+	MaxConcurrentReconciles int
+
+	// ReconcileInterval controls how soon a successful WorkerDeployment
+	// reconciliation is checked again. Values less than or equal to zero use
+	// DefaultReconcileInterval.
+	ReconcileInterval time.Duration
+
 	// When a Worker Deployment has the maximum number of versions (100 per Worker Deployment by default),
 	// it will delete the oldest eligible version when a worker with the 101st version arrives.
 	// If no versions are eligible for deletion, that worker's poll will fail, which is dangerous.
@@ -105,6 +115,39 @@ type WorkerDeploymentReconciler struct {
 	// server value of `matching.maxVersionsInDeployment=100`.
 	// Users who reduce `matching.maxVersionsInDeployment` in their dynamicconfig should also reduce this value.
 	MaxDeploymentVersionsIneligibleForDeletion int32
+}
+
+const (
+	DefaultMaxConcurrentReconciles = 100
+	DefaultReconcileInterval       = 10 * time.Second
+)
+
+func (r *WorkerDeploymentReconciler) maxConcurrentReconciles() int {
+	if r.MaxConcurrentReconciles > 0 {
+		return r.MaxConcurrentReconciles
+	}
+	return DefaultMaxConcurrentReconciles
+}
+
+func (r *WorkerDeploymentReconciler) reconcileInterval() time.Duration {
+	if r.ReconcileInterval > 0 {
+		return r.ReconcileInterval
+	}
+	return DefaultReconcileInterval
+}
+
+func (r *WorkerDeploymentReconciler) controllerOptions(recoverPanic *bool) controller.Options {
+	return controller.Options{
+		MaxConcurrentReconciles: r.maxConcurrentReconciles(),
+		RecoverPanic:            recoverPanic,
+	}
+}
+
+func (r *WorkerDeploymentReconciler) successfulReconcileResult() ctrl.Result {
+	return ctrl.Result{
+		Requeue:      true,
+		RequeueAfter: r.reconcileInterval(),
+	}
 }
 
 // +kubebuilder:rbac:groups=temporal.io,resources=temporalconnections,verbs=get;list;watch;update;patch
@@ -393,13 +436,7 @@ func (r *WorkerDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{
-		Requeue: true,
-		// TODO(jlegrone): Consider increasing this value if the only thing we need to check for is unreachable versions.
-		RequeueAfter: 10 * time.Second,
-		// For demo purposes only!
-		//RequeueAfter: 1 * time.Second,
-	}, nil
+	return r.successfulReconcileResult(), nil
 }
 
 // migrateFromDeprecatedTWD checks for a TemporalWorkerDeployment stub with the
@@ -871,10 +908,7 @@ func (r *WorkerDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&temporaliov1alpha1.TemporalWorkerDeployment{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
 			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}}}
 		})).
-		WithOptions(controller.Options{
-			MaxConcurrentReconciles: 100,
-			RecoverPanic:            &recoverPanic,
-		}).
+		WithOptions(r.controllerOptions(&recoverPanic)).
 		Complete(r)
 }
 
