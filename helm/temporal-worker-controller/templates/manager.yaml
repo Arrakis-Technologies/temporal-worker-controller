@@ -98,6 +98,8 @@ spec:
         {{- end }}
         {{- end }}
         - "--health-probe-bind-address=:8081"
+        - "--max-concurrent-reconciles={{ .Values.maxConcurrentReconciles }}"
+        - "--reconcile-interval={{ .Values.reconcileInterval }}"
         ports:
           - containerPort: {{ .Values.webhook.port }}
             name: webhook-server

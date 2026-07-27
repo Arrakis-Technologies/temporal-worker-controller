@@ -215,6 +215,19 @@
       "default": 1,
       "description": "Number of replicas of manager to run.\n\nThe default is 1, but in production set this to 2 or 3 to provide high availability.",
       "type": "number"
+    },
+    "maxConcurrentReconciles": {
+      "default": 100,
+      "description": "Maximum number of WorkerDeployment reconciliations allowed to call Temporal concurrently.",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "reconcileInterval": {
+      "default": "10s",
+      "description": "Go duration between successful WorkerDeployment reconciliations.",
+      "minLength": 2,
+      "pattern": "^[1-9][0-9]*(ns|us|µs|ms|s|m|h)$",
+      "type": "string"
     }
   }
 } 
