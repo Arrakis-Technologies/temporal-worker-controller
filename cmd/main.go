@@ -106,8 +106,9 @@ func main() {
 	}
 
 	if err = (&controller.WorkerDeploymentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
 		TemporalClientPool: clientpool.New(
 			log.NewStructuredLogger(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 				AddSource:   false,

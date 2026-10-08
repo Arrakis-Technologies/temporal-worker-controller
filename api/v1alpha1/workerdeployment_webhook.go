@@ -45,6 +45,9 @@ func (r *WorkerDeployment) Default(ctx context.Context, obj runtime.Object) erro
 }
 
 func (s *WorkerDeploymentSpec) Default(ctx context.Context) error {
+	if s.SunsetStrategy.RetirementPolicy == "" {
+		s.SunsetStrategy.RetirementPolicy = WorkerRetirementAutomatic
+	}
 	if s.SunsetStrategy.ScaledownDelay == nil {
 		s.SunsetStrategy.ScaledownDelay = &v1.Duration{Duration: defaults.ScaledownDelay}
 	}
@@ -63,7 +66,12 @@ func (r *WorkerDeployment) ValidateCreate(ctx context.Context, obj runtime.Objec
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type
 func (r *WorkerDeployment) ValidateUpdate(ctx context.Context, oldObj runtime.Object, newObj runtime.Object) (admission.Warnings, error) {
-	return r.validateForUpdateOrCreate(ctx, newObj)
+	old, oldOK := oldObj.(*WorkerDeployment)
+	next, nextOK := newObj.(*WorkerDeployment)
+	if !oldOK || !nextOK {
+		return nil, apierrors.NewBadRequest("expected a WorkerDeployment for both old and new objects")
+	}
+	return validateForUpdateOrCreate(old, next)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type
@@ -82,6 +90,20 @@ func (r *WorkerDeployment) validateForUpdateOrCreate(ctx context.Context, obj ru
 
 func validateForUpdateOrCreate(old, new *WorkerDeployment) (admission.Warnings, error) {
 	allErrs := validateRolloutStrategy(new.Spec.RolloutStrategy)
+	policy := new.Spec.SunsetStrategy.RetirementPolicy
+	if policy != "" && policy != WorkerRetirementAutomatic && policy != WorkerRetirementExternal {
+		allErrs = append(allErrs, field.Invalid(field.NewPath("spec.sunset.retirementPolicy"), policy, "unknown retirement policy"))
+	}
+	if old != nil && old.Spec.SunsetStrategy.RetirementPolicy == WorkerRetirementExternal && policy != WorkerRetirementExternal {
+		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.sunset.retirementPolicy"), "external retirement cannot be disabled"))
+	}
+	seen := map[string]bool{}
+	for _, request := range new.Spec.SunsetStrategy.Retirements {
+		if policy != WorkerRetirementExternal || request.BuildID == "" || request.RequestID == "" || seen[request.BuildID] {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("spec.sunset.retirements"), request.BuildID, "requires External policy and unique non-empty build/request identities"))
+		}
+		seen[request.BuildID] = true
+	}
 	if len(allErrs) > 0 {
 		return nil, newInvalidErr(new, allErrs)
 	}

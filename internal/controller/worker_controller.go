@@ -86,6 +86,8 @@ func resolveAuthSecretName(tc *temporaliov1alpha1.Connection) (clientpool.AuthMo
 // WorkerDeploymentReconciler reconciles a WorkerDeployment object
 type WorkerDeploymentReconciler struct {
 	client.Client
+	// Uncached reads fence destructive plans against changed release requests.
+	APIReader          client.Reader
 	Scheme             *runtime.Scheme
 	TemporalClientPool *clientpool.ClientPool
 	Recorder           record.EventRecorder
@@ -392,6 +394,9 @@ func (r *WorkerDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// Derive Ready/Progressing from rollout state before the final write.
+	if err := r.acknowledgeRetirement(ctx, &workerDeploy, plan); err != nil {
+		return ctrl.Result{}, err
+	}
 	r.syncConditions(&workerDeploy)
 
 	// Single status write per reconcile: persists the generated status and

@@ -114,11 +114,12 @@ func IsDeploymentHealthy(deployment *appsv1.Deployment) (bool, *metav1.Time) {
 // NewObjectRef creates a reference to a Kubernetes object
 func NewObjectRef(obj client.Object) *corev1.ObjectReference {
 	return &corev1.ObjectReference{
-		APIVersion: obj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
-		Kind:       obj.GetObjectKind().GroupVersionKind().Kind,
-		Name:       obj.GetName(),
-		Namespace:  obj.GetNamespace(),
-		UID:        obj.GetUID(),
+		APIVersion:      obj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
+		Kind:            obj.GetObjectKind().GroupVersionKind().Kind,
+		Name:            obj.GetName(),
+		Namespace:       obj.GetNamespace(),
+		UID:             obj.GetUID(),
+		ResourceVersion: obj.GetResourceVersion(),
 	}
 }
 

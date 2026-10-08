@@ -71,7 +71,7 @@ func TestWorkerDeployment_ValidateCreate(t *testing.T) {
 
 			// Verify that create and update enforce the same rules
 			assertAdmission(webhook.ValidateCreate(ctx, tc.obj))
-			assertAdmission(webhook.ValidateUpdate(ctx, nil, tc.obj))
+			assertAdmission(webhook.ValidateUpdate(ctx, &temporaliov1alpha1.WorkerDeployment{}, tc.obj))
 		})
 	}
 }
@@ -83,7 +83,7 @@ func TestWorkerDeployment_ValidateUpdate(t *testing.T) {
 		errorMsg string
 	}{
 		"valid update": {
-			oldObj: nil,
+			oldObj: testhelpers.MakeWDWithName("valid-worker", ""),
 			newObj: testhelpers.MakeWDWithName("valid-worker", ""),
 		},
 	}

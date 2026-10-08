@@ -181,6 +181,10 @@ const (
 
 // WorkerDeploymentStatus defines the observed state of WorkerDeployment
 type WorkerDeploymentStatus struct {
+	// Retirement acknowledges the exact generation's external lifecycle policy.
+	// It is written only after the reconciliation plan succeeds.
+	// +optional
+	Retirement *WorkerRetirementStatus `json:"retirement,omitempty"`
 	// Remember, status should be able to be reconstituted from the state of the world,
 	// so it's generally not a good idea to read from the status of the root object.
 	// Instead, you should reconstruct it every run.
@@ -406,7 +410,22 @@ type RolloutStrategy struct {
 }
 
 // SunsetStrategy defines strategy to apply when sunsetting k8s deployments of drained versions.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.retirementPolicy) || oldSelf.retirementPolicy != 'External' || (has(self.retirementPolicy) && self.retirementPolicy == 'External')",message="external retirement cannot be disabled on a live worker deployment"
+// +kubebuilder:validation:XValidation:rule="!has(self.retirements) || size(self.retirements) == 0 || (has(self.retirementPolicy) && self.retirementPolicy == 'External')",message="retirement requests require External policy"
 type SunsetStrategy struct {
+	// Automatic preserves the ordinary Temporal drainage-based sunset.
+	// External keeps exact-version workers runnable until their external owner
+	// authorizes retirement. Temporal drainage alone is not release authority.
+	// +optional
+	// +kubebuilder:default=Automatic
+	RetirementPolicy WorkerRetirementPolicy `json:"retirementPolicy,omitempty"`
+
+	// Build-specific release authorizations. The producer must fence all new
+	// references until retirement is acknowledged and this request is removed.
+	// +optional
+	// +listType=map
+	// +listMapKey=buildID
+	Retirements []WorkerVersionRetirement `json:"retirements,omitempty"`
 	// ScaledownDelay specifies how long to wait after a version is drained before scaling its Deployment to zero.
 	// Defaults to 1 hour.
 	// +optional

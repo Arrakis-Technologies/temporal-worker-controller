@@ -32,6 +32,9 @@ import (
 )
 
 func (r *WorkerDeploymentReconciler) executeK8sOperations(ctx context.Context, l logr.Logger, workerDeploy *temporaliov1alpha1.WorkerDeployment, p *plan) error {
+	if err := r.checkRetirementPlan(ctx, workerDeploy); err != nil {
+		return err
+	}
 	// Create deployment
 	if p.CreateDeployment != nil {
 		l.Info("creating deployment", "deployment", p.CreateDeployment)
@@ -45,8 +48,18 @@ func (r *WorkerDeploymentReconciler) executeK8sOperations(ctx context.Context, l
 
 	// Delete deployments
 	for _, d := range p.DeleteDeployments {
+		if err := r.checkRetirementPlan(ctx, workerDeploy); err != nil {
+			return err
+		}
 		l.Info("deleting deployment", "deployment", d)
-		if err := r.Delete(ctx, d); err != nil {
+		options := []client.DeleteOption{}
+		if workerDeploy.Spec.SunsetStrategy.RetirementPolicy == temporaliov1alpha1.WorkerRetirementExternal {
+			if d.UID == "" || d.ResourceVersion == "" {
+				return fmt.Errorf("external retirement Deployment lacks UID/resourceVersion fence")
+			}
+			options = append(options, client.Preconditions{UID: &d.UID, ResourceVersion: &d.ResourceVersion})
+		}
+		if err := r.Delete(ctx, d, options...); client.IgnoreNotFound(err) != nil {
 			l.Error(err, "unable to delete deployment", "deployment", d)
 			r.Recorder.Eventf(workerDeploy, corev1.EventTypeWarning, ReasonDeploymentDeleteFailed,
 				"Failed to delete Deployment %q: %v", d.Name, err)
@@ -70,7 +83,24 @@ func (r *WorkerDeploymentReconciler) executeK8sOperations(ctx context.Context, l
 		obj.SetGroupVersionKind(schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: res.Kind})
 		obj.SetNamespace(res.Namespace)
 		obj.SetName(res.Name)
-		if err := r.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
+		options := []client.DeleteOption{}
+		if workerDeploy.Spec.SunsetStrategy.RetirementPolicy == temporaliov1alpha1.WorkerRetirementExternal {
+			if err := r.retirementReader().Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+				if client.IgnoreNotFound(err) == nil {
+					continue
+				}
+				return err
+			}
+			if err := r.checkRetirementPlan(ctx, workerDeploy); err != nil {
+				return err
+			}
+			uid, version := obj.GetUID(), obj.GetResourceVersion()
+			options = append(options, client.Preconditions{UID: &uid, ResourceVersion: &version})
+		}
+		if err := r.Delete(ctx, obj, options...); client.IgnoreNotFound(err) != nil {
+			if workerDeploy.Spec.SunsetStrategy.RetirementPolicy == temporaliov1alpha1.WorkerRetirementExternal {
+				return err
+			}
 			l.Error(err, "unable to delete worker resource on version sunset",
 				"apiVersion", res.APIVersion, "kind", res.Kind, "name", res.Name)
 		} else {
@@ -81,6 +111,11 @@ func (r *WorkerDeploymentReconciler) executeK8sOperations(ctx context.Context, l
 
 	// Scale deployments
 	for d, replicas := range p.ScaleDeployments {
+		if replicas == 0 || workerDeploy.Spec.SunsetStrategy.RetirementPolicy == temporaliov1alpha1.WorkerRetirementExternal {
+			if err := r.checkRetirementPlan(ctx, workerDeploy); err != nil {
+				return err
+			}
+		}
 		l.Info("scaling deployment", "deployment", d, "replicas", replicas)
 		dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
 			Namespace:       d.Namespace,
@@ -90,6 +125,12 @@ func (r *WorkerDeploymentReconciler) executeK8sOperations(ctx context.Context, l
 		}}
 
 		scale := &autoscalingv1.Scale{Spec: autoscalingv1.ScaleSpec{Replicas: int32(replicas)}}
+		if workerDeploy.Spec.SunsetStrategy.RetirementPolicy == temporaliov1alpha1.WorkerRetirementExternal {
+			if d.UID == "" || d.ResourceVersion == "" {
+				return fmt.Errorf("external retirement scale lacks UID/resourceVersion fence")
+			}
+			scale.ObjectMeta = metav1.ObjectMeta{UID: d.UID, ResourceVersion: d.ResourceVersion}
+		}
 		if err := r.Client.SubResource("scale").Update(ctx, dep, client.WithSubResourceBody(scale)); err != nil {
 			l.Error(err, "unable to scale deployment", "deployment", d, "replicas", replicas)
 			r.Recorder.Eventf(workerDeploy, corev1.EventTypeWarning, ReasonDeploymentScaleFailed,
@@ -351,6 +392,9 @@ func (r *WorkerDeploymentReconciler) executePlan(ctx context.Context, l logr.Log
 	wrtResults := make(map[wrtKey][]applyResult)
 
 	for _, apply := range p.ApplyWorkerResources {
+		if err := r.checkRetirementPlan(ctx, workerDeploy); err != nil {
+			return err
+		}
 		key := wrtKey{apply.WRTNamespace, apply.WRTName}
 
 		// Render failure: record the error in status without attempting an SSA apply.

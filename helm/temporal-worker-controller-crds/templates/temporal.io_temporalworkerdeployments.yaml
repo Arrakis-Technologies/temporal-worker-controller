@@ -141,10 +141,42 @@ spec:
                   deleteDelay:
                     default: 24h
                     type: string
+                  retirementPolicy:
+                    default: Automatic
+                    enum:
+                    - Automatic
+                    - External
+                    type: string
+                  retirements:
+                    items:
+                      properties:
+                        buildID:
+                          minLength: 1
+                          type: string
+                        requestID:
+                          minLength: 1
+                          type: string
+                      required:
+                      - buildID
+                      - requestID
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - buildID
+                    x-kubernetes-list-type: map
                   scaledownDelay:
                     default: 1h
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: external retirement cannot be disabled on a live worker
+                    deployment
+                  rule: '!has(oldSelf.retirementPolicy) || oldSelf.retirementPolicy
+                    != ''External'' || (has(self.retirementPolicy) && self.retirementPolicy
+                    == ''External'')'
+                - message: retirement requests require External policy
+                  rule: '!has(self.retirements) || size(self.retirements) == 0 ||
+                    (has(self.retirementPolicy) && self.retirementPolicy == ''External'')'
               template:
                 properties:
                   metadata:

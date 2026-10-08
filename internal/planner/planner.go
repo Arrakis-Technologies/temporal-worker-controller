@@ -161,8 +161,22 @@ func GeneratePlan(
 	// TODO(jlegrone): generate warnings/events on the WorkerDeployment resource when buildIDs are reachable
 	//                 but have no corresponding Deployment.
 
-	plan.ApplyWorkerResources = getWorkerResourceApplies(l, wrts, k8sState, spec.WorkerOptions.TemporalNamespace, plan.DeleteDeployments)
-	plan.DeleteWorkerResources = getDeleteWorkerResources(wrts, plan.DeleteDeployments)
+	resourceRetirements := append(append([]*appsv1.Deployment{}, plan.DeleteDeployments...), externalRetirementResources(k8sState, status, spec)...)
+	if externalRetirement(spec) && len(resourceRetirements) > 0 {
+		// We cannot acknowledge absence if an attached creator's identity cannot
+		// be decoded. Legacy automatic sunset retains its historical behavior.
+		for _, wrt := range wrts {
+			var identity struct {
+				APIVersion string `json:"apiVersion"`
+				Kind       string `json:"kind"`
+			}
+			if err := json.Unmarshal(wrt.Spec.Template.Raw, &identity); err != nil || identity.APIVersion == "" || identity.Kind == "" {
+				return nil, fmt.Errorf("cannot authorize external retirement with unreadable WorkerResourceTemplate %s", wrt.Name)
+			}
+		}
+	}
+	plan.ApplyWorkerResources = getWorkerResourceApplies(l, wrts, k8sState, spec.WorkerOptions.TemporalNamespace, resourceRetirements)
+	plan.DeleteWorkerResources = getDeleteWorkerResources(wrts, resourceRetirements)
 	plan.EnsureWRTOwnerRefs = getWRTOwnerRefPatches(wrts, twdName, twdUID)
 
 	return plan, nil
@@ -297,9 +311,11 @@ func getDeleteWorkerResources(
 
 	// Collect the build IDs that are being deleted.
 	var deletingBuildIDs []string
+	seenBuildIDs := map[string]bool{}
 	for _, d := range deleteDeployments {
-		if bid, ok := d.Labels[k8s.BuildIDLabel]; ok && bid != "" {
+		if bid, ok := d.Labels[k8s.BuildIDLabel]; ok && bid != "" && !seenBuildIDs[bid] {
 			deletingBuildIDs = append(deletingBuildIDs, bid)
+			seenBuildIDs[bid] = true
 		}
 	}
 
@@ -588,6 +604,9 @@ func getDeleteDeployments(
 	var deleteDeployments []*appsv1.Deployment
 
 	for _, version := range status.DeprecatedVersions {
+		if externallyRetained(spec, version.BuildID) || (externalRetirement(spec) && retirementRouted(status, version.BuildID)) {
+			continue
+		}
 		if version.Deployment == nil {
 			continue
 		}
@@ -610,7 +629,7 @@ func getDeleteDeployments(
 			}
 		case temporaliov1alpha1.VersionStatusNotRegistered:
 			// Only delete Deployments of NotRegistered versions if temporalState was not empty
-			if foundDeploymentInTemporal &&
+			if (foundDeploymentInTemporal || externalRetirement(spec)) &&
 				// NotRegistered versions are versions that the server doesn't know about.
 				// Only delete if it's not the target version.
 				status.TargetVersion.BuildID != version.BuildID {
@@ -676,6 +695,17 @@ func getScaleDeployments(
 
 		d, exists := k8sState.Deployments[version.BuildID]
 		if !exists {
+			continue
+		}
+
+		if externallyRetained(spec, version.BuildID) || (externalRetirement(spec) && retirementRouted(status, version.BuildID)) {
+			// Drainage concerns existing Temporal executions, not future
+			// explicitly pinned Actions against an externally retained contract.
+			// Preserve the original template and restore a bootstrap poller if
+			// an earlier automatic-sunset binary left this Deployment at zero.
+			if d.Spec.Replicas != nil && *d.Spec.Replicas == 0 {
+				scaleDeployments[version.Deployment] = 1
+			}
 			continue
 		}
 
