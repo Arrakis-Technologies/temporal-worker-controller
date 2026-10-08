@@ -29,7 +29,6 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -94,6 +93,14 @@ type WorkerDeploymentReconciler struct {
 
 	// Disables panic recovery if true
 	DisableRecoverPanic bool
+
+	// MaxConcurrentReconciles limits concurrent WorkerDeployment reconciliations.
+	// Non-positive values use DefaultMaxConcurrentReconciles for direct callers.
+	MaxConcurrentReconciles int
+
+	// ReconcileInterval sets the delay after a successful reconciliation.
+	// Non-positive values use DefaultReconcileInterval for direct callers.
+	ReconcileInterval time.Duration
 
 	// When a Worker Deployment has the maximum number of versions (100 per Worker Deployment by default),
 	// it will delete the oldest eligible version when a worker with the 101st version arrives.
@@ -412,13 +419,7 @@ func (r *WorkerDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{
-		Requeue: true,
-		// TODO(jlegrone): Consider increasing this value if the only thing we need to check for is unreachable versions.
-		RequeueAfter: 10 * time.Second,
-		// For demo purposes only!
-		//RequeueAfter: 1 * time.Second,
-	}, nil
+	return ctrl.Result{Requeue: true, RequeueAfter: r.reconcileInterval()}, nil
 }
 
 // migrateFromDeprecatedTWD checks for a TemporalWorkerDeployment stub with the
@@ -891,10 +892,7 @@ func (r *WorkerDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&temporaliov1alpha1.TemporalWorkerDeployment{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
 			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}}}
 		})).
-		WithOptions(controller.Options{
-			MaxConcurrentReconciles: 100,
-			RecoverPanic:            &recoverPanic,
-		}).
+		WithOptions(r.controllerOptions(&recoverPanic)).
 		Complete(r)
 }
 

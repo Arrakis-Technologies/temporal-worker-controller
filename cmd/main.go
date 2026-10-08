@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	temporaliov1alpha1 "github.com/temporalio/temporal-worker-controller/api/v1alpha1"
 	"github.com/temporalio/temporal-worker-controller/internal/controller"
@@ -46,6 +47,8 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var watchNamespaces string
+	var maxConcurrentReconciles int
+	var reconcileInterval time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
@@ -54,11 +57,19 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
+	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", controller.DefaultMaxConcurrentReconciles,
+		"Maximum number of WorkerDeployment reconciliations allowed to run concurrently.")
+	flag.DurationVar(&reconcileInterval, "reconcile-interval", controller.DefaultReconcileInterval,
+		"Interval between successful WorkerDeployment reconciliations.")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	if err := validateControllerSettings(maxConcurrentReconciles, reconcileInterval); err != nil {
+		fmt.Fprintln(os.Stderr, "invalid controller settings:", err)
+		os.Exit(1)
+	}
 
 	if watchNamespaces == "" {
 		watchNamespaces = os.Getenv("WATCH_NAMESPACES")
@@ -117,7 +128,9 @@ func main() {
 			}))),
 			mgr.GetClient(),
 		),
-		Recorder: mgr.GetEventRecorderFor("temporal-worker-controller"),
+		Recorder:                mgr.GetEventRecorderFor("temporal-worker-controller"),
+		MaxConcurrentReconciles: maxConcurrentReconciles,
+		ReconcileInterval:       reconcileInterval,
 		MaxDeploymentVersionsIneligibleForDeletion: controller.GetControllerMaxDeploymentVersionsIneligibleForDeletion(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "WorkerDeployment")
@@ -176,4 +189,14 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func validateControllerSettings(maxConcurrentReconciles int, reconcileInterval time.Duration) error {
+	if maxConcurrentReconciles < 1 {
+		return fmt.Errorf("max-concurrent-reconciles must be at least 1")
+	}
+	if reconcileInterval <= 0 {
+		return fmt.Errorf("reconcile-interval must be greater than zero")
+	}
+	return nil
 }

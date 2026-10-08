@@ -9,6 +9,21 @@ This document provides comprehensive configuration options for the Temporal Work
 3. [Worker Options](#worker-options)
 4. [Gate Configuration](#gate-configuration)
 5. [Advanced Configuration](#advanced-configuration)
+6. [Controller Runtime Settings](#controller-runtime-settings)
+
+## Controller Runtime Settings
+
+The controller executable accepts these arguments:
+
+- `--max-concurrent-reconciles`: maximum concurrent WorkerDeployment reconciliations. The default is `100`.
+- `--reconcile-interval`: delay after a successful reconciliation. The default is `10s`.
+
+Both values must be positive. Invalid values stop the controller before it starts a Kubernetes manager.
+These settings do not change the number of worker replicas or concurrent Actions.
+Resource events can trigger an earlier reconciliation. Error, conflict, and rate-limit retries retain their separate delays.
+
+HQ uses `--max-concurrent-reconciles=1 --reconcile-interval=5s`.
+Existing deployment arguments do not need to change for this compatibility fix.
 
 ## Rollout Strategies
 
