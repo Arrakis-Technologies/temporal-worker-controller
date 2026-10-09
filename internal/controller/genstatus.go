@@ -53,6 +53,17 @@ func (r *WorkerDeploymentReconciler) generateStatus(
 	// Use the state mapper to convert state objects to CRD status
 	stateMapper := newStateMapper(k8sState, temporalState, workerDeploymentName)
 	status := stateMapper.mapToStatus(targetBuildID)
+	// Enrollment describes this immutable spec generation, not the success of
+	// the next reconcile. Keep it through temporary planning/execution errors.
+	// Build absence is a fresh proof and must be re-established after success.
+	if previous := workerDeploy.Status.Retirement; previous != nil &&
+		previous.Policy == temporaliov1alpha1.WorkerRetirementExternal &&
+		workerDeploy.Spec.SunsetStrategy.RetirementPolicy == temporaliov1alpha1.WorkerRetirementExternal &&
+		previous.ObservedGeneration == workerDeploy.Generation {
+		status.Retirement = &temporaliov1alpha1.WorkerRetirementStatus{
+			Policy: previous.Policy, ObservedGeneration: previous.ObservedGeneration,
+		}
+	}
 
 	return status, nil
 }

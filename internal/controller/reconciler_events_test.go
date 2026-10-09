@@ -563,6 +563,11 @@ func TestReconcile_PlanGenerationFailed_EmitsEvent(t *testing.T) {
 
 	tc := makeNoCredsConnection("my-conn", k8sNamespace, hostPort)
 	twd := makeWD("test-worker", k8sNamespace, tc.Name)
+	twd.Spec.SunsetStrategy.RetirementPolicy = temporaliov1alpha1.WorkerRetirementExternal
+	twd.Status.Retirement = &temporaliov1alpha1.WorkerRetirementStatus{
+		Policy: temporaliov1alpha1.WorkerRetirementExternal, ObservedGeneration: twd.Generation,
+		RetiredVersions: []temporaliov1alpha1.WorkerVersionRetirement{{BuildID: "old", RequestID: "job"}},
+	}
 
 	listCallCount := 0
 	r, recorder := newTestReconcilerWithInterceptors([]client.Object{twd, tc}, interceptor.Funcs{
@@ -594,6 +599,10 @@ func TestReconcile_PlanGenerationFailed_EmitsEvent(t *testing.T) {
 	require.NotNil(t, cond, "Progressing condition should be set")
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, ReasonPlanGenerationFailed, cond.Reason)
+	require.NotNil(t, updated.Status.Retirement, "temporary failure must not erase policy enrollment")
+	assert.Equal(t, twd.Generation, updated.Status.Retirement.ObservedGeneration)
+	assert.Equal(t, temporaliov1alpha1.WorkerRetirementExternal, updated.Status.Retirement.Policy)
+	assert.Empty(t, updated.Status.Retirement.RetiredVersions, "failed reconcile must not restate old absence proof")
 	// PlanGenerationFailed is not a connection issue — ConnectionHealthy must not be set.
 	connHealthy := meta.FindStatusCondition(updated.Status.Conditions, temporaliov1alpha1.ConditionConnectionHealthy) //nolint:staticcheck // backward compat
 	assert.Nil(t, connHealthy, "ConnectionHealthy should not be set for plan generation failures")
@@ -608,6 +617,11 @@ func TestReconcile_PlanExecutionFailed_EmitsEvent(t *testing.T) {
 
 	tc := makeNoCredsConnection("my-conn", k8sNamespace, hostPort)
 	twd := makeWD("test-worker", k8sNamespace, tc.Name)
+	twd.Spec.SunsetStrategy.RetirementPolicy = temporaliov1alpha1.WorkerRetirementExternal
+	twd.Status.Retirement = &temporaliov1alpha1.WorkerRetirementStatus{
+		Policy: temporaliov1alpha1.WorkerRetirementExternal, ObservedGeneration: twd.Generation,
+		RetiredVersions: []temporaliov1alpha1.WorkerVersionRetirement{{BuildID: "old", RequestID: "job"}},
+	}
 
 	r, recorder := newTestReconcilerWithInterceptors([]client.Object{twd, tc}, interceptor.Funcs{
 		Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
@@ -636,6 +650,10 @@ func TestReconcile_PlanExecutionFailed_EmitsEvent(t *testing.T) {
 	require.NotNil(t, cond, "Progressing condition should be set")
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, ReasonPlanExecutionFailed, cond.Reason)
+	require.NotNil(t, updated.Status.Retirement, "temporary failure must not erase policy enrollment")
+	assert.Equal(t, twd.Generation, updated.Status.Retirement.ObservedGeneration)
+	assert.Equal(t, temporaliov1alpha1.WorkerRetirementExternal, updated.Status.Retirement.Policy)
+	assert.Empty(t, updated.Status.Retirement.RetiredVersions, "failed reconcile must not restate old absence proof")
 	// PlanExecutionFailed is not a connection issue — ConnectionHealthy must not be set.
 	connHealthy := meta.FindStatusCondition(updated.Status.Conditions, temporaliov1alpha1.ConditionConnectionHealthy) //nolint:staticcheck // backward compat
 	assert.Nil(t, connHealthy, "ConnectionHealthy should not be set for plan execution failures")

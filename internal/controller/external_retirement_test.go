@@ -20,10 +20,15 @@ func TestExternalRetirementStalePlanAndAcknowledgement(t *testing.T) {
 	worker.Spec.SunsetStrategy.Retirements = []api.WorkerVersionRetirement{{BuildID: "B", RequestID: "job"}}
 	deployment := &apps.Deployment{ObjectMeta: meta.ObjectMeta{Name: "old-b", Namespace: "test", Labels: map[string]string{k8s.WorkerDeploymentNameLabel: "pool", k8s.BuildIDLabel: "B"}}}
 	r, _ := newTestReconciler([]client.Object{worker, deployment})
+	fresh, _ := newTestReconciler([]client.Object{worker.DeepCopy(), deployment.DeepCopy()})
+	r.APIReader = fresh.Client
 	require.NoError(t, r.acknowledgeRetirement(ctx, worker, &plan{}))
 	require.Empty(t, worker.Status.Retirement.RetiredVersions, "present original worker cannot be acknowledged retired")
 	require.Equal(t, int64(2), worker.Status.Retirement.ObservedGeneration)
 	require.NoError(t, r.Delete(ctx, deployment))
+	require.NoError(t, r.acknowledgeRetirement(ctx, worker, &plan{}))
+	require.Empty(t, worker.Status.Retirement.RetiredVersions, "cached absence cannot override a live worker")
+	require.NoError(t, fresh.Delete(ctx, deployment))
 	require.NoError(t, r.acknowledgeRetirement(ctx, worker, &plan{}))
 	require.Equal(t, worker.Spec.SunsetStrategy.Retirements, worker.Status.Retirement.RetiredVersions)
 	stale := worker.DeepCopy()
@@ -38,4 +43,11 @@ func TestExternalRetirementStalePlanAndAcknowledgement(t *testing.T) {
 	worker.Status.TargetVersion.BuildID = "B"
 	require.NoError(t, r.acknowledgeRetirement(ctx, worker, &plan{}))
 	require.Empty(t, worker.Status.Retirement.RetiredVersions, "missing target does not grant retirement")
+	// The cached spec still contains the release request; only the uncached
+	// reader sees its withdrawal. Old work must stop at that boundary.
+	withdrawn := worker.DeepCopy()
+	withdrawn.Generation++
+	withdrawn.Spec.SunsetStrategy.Retirements = nil
+	require.NoError(t, fresh.Update(ctx, withdrawn))
+	require.True(t, apierrors.IsConflict(r.checkRetirementPlan(ctx, worker)))
 }
