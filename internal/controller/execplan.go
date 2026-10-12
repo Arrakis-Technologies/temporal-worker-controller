@@ -403,9 +403,6 @@ func (r *WorkerDeploymentReconciler) executePlan(ctx context.Context, l logr.Log
 	wrtResults := make(map[wrtKey][]applyResult)
 
 	for _, apply := range p.ApplyWorkerResources {
-		if err := r.checkRetirementPlan(ctx, workerDeploy); err != nil {
-			return err
-		}
 		key := wrtKey{apply.WRTNamespace, apply.WRTName}
 
 		// Render failure: record the error in status without attempting an SSA apply.
@@ -435,6 +432,9 @@ func (r *WorkerDeploymentReconciler) executePlan(ctx context.Context, l logr.Log
 			continue
 		}
 
+		if err := r.checkRetirementPlan(ctx, workerDeploy); err != nil {
+			return err
+		}
 		l.Info("applying rendered worker resource template",
 			"name", apply.Resource.GetName(),
 			"kind", apply.Resource.GetKind(),

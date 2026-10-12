@@ -9,6 +9,7 @@ import (
 	"github.com/temporalio/temporal-worker-controller/internal/k8s"
 	"github.com/temporalio/temporal-worker-controller/internal/temporal"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"slices"
 )
 
 // stateMapper maps between Kubernetes and Temporal states
@@ -53,8 +54,22 @@ func (m *stateMapper) mapToStatus(targetBuildID string) *v1alpha1.WorkerDeployme
 	}
 
 	// Add deprecated versions
-	var deprecatedVersions []*v1alpha1.DeprecatedWorkerDeploymentVersion
+	// Temporal still owns drainage after a Kubernetes Deployment disappears.
+	// Keep both inventories so retirement cannot mistake missing pods for drainage.
+	builds := make(map[string]struct{}, len(m.k8sState.Deployments)+len(m.temporalState.Versions))
 	for buildID := range m.k8sState.Deployments {
+		builds[buildID] = struct{}{}
+	}
+	for buildID := range m.temporalState.Versions {
+		builds[buildID] = struct{}{}
+	}
+	buildIDs := make([]string, 0, len(builds))
+	for buildID := range builds {
+		buildIDs = append(buildIDs, buildID)
+	}
+	slices.Sort(buildIDs)
+	var deprecatedVersions []*v1alpha1.DeprecatedWorkerDeploymentVersion
+	for _, buildID := range buildIDs {
 		// Skip current and target versions
 		if buildID == currentBuildID || buildID == targetBuildID {
 			continue

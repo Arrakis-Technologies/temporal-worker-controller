@@ -53,7 +53,11 @@ func TestConfiguredConcurrencyBoundsActualReconciles(t *testing.T) {
 			r, _ := newTestReconcilerWithInterceptors(nil, interceptor.Funcs{
 				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
 					if _, ok := object.(*api.WorkerDeployment); ok {
-						started <- key
+						select {
+						case started <- key:
+						case <-ctx.Done():
+							return ctx.Err()
+						}
 						select {
 						case <-release:
 						case <-ctx.Done():

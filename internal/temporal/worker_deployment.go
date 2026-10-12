@@ -90,11 +90,11 @@ func GetWorkerDeploymentState(
 
 	workerDeploymentInfo := resp.GetWorkerDeploymentInfo()
 	if workerDeploymentInfo == nil {
-		return state, nil
+		return nil, fmt.Errorf("describe worker deployment %s returned no deployment information", workerDeploymentName)
 	}
 	routingConfig := workerDeploymentInfo.GetRoutingConfig()
 	if routingConfig == nil {
-		return state, nil
+		return nil, fmt.Errorf("describe worker deployment %s returned no routing information", workerDeploymentName)
 	}
 
 	// Set basic information

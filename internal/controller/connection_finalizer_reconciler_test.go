@@ -8,6 +8,7 @@ import (
 	"time"
 
 	temporaliov1alpha1 "github.com/temporalio/temporal-worker-controller/api/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -61,6 +62,9 @@ func TestConnectionFinalizerReconcilerRemovesOrphanedFinalizer(t *testing.T) {
 
 	var observed temporaliov1alpha1.Connection
 	err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(connection), &observed)
+	if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatalf("get orphaned connection: %v", err)
+	}
 	if err == nil && containsString(observed.Finalizers, finalizerName) {
 		t.Fatalf("orphaned connection still has %q finalizer", finalizerName)
 	}

@@ -224,16 +224,20 @@ type stubWDClient struct {
 func (s *stubWDClient) GetHandle(_ string) sdkclient.WorkerDeploymentHandle { return s.handle }
 
 // stubWorkflowServiceClient implements workflowservice.WorkflowServiceClient, returning
-// a valid empty response for DescribeWorkerDeployment (no versions, no routing config),
+// a valid empty response for DescribeWorkerDeployment (no versions, empty routing config),
 // or a configurable error if describeDeploymentErr is set.
 type stubWorkflowServiceClient struct {
 	workflowservice.WorkflowServiceClient
-	describeDeploymentErr error
+	describeDeploymentErr      error
+	describeDeploymentResponse *workflowservice.DescribeWorkerDeploymentResponse
 }
 
 func (s *stubWorkflowServiceClient) DescribeWorkerDeployment(_ context.Context, _ *workflowservice.DescribeWorkerDeploymentRequest, _ ...grpc.CallOption) (*workflowservice.DescribeWorkerDeploymentResponse, error) {
 	if s.describeDeploymentErr != nil {
 		return nil, s.describeDeploymentErr
+	}
+	if s.describeDeploymentResponse != nil {
+		return s.describeDeploymentResponse, nil
 	}
 	return &workflowservice.DescribeWorkerDeploymentResponse{
 		WorkerDeploymentInfo: &deploymentpb.WorkerDeploymentInfo{
@@ -246,9 +250,10 @@ func (s *stubWorkflowServiceClient) DescribeWorkerDeployment(_ context.Context, 
 // ExecuteWorkflow to configurable stubs.
 type stubTemporalClient struct {
 	sdkclient.Client
-	wdClient              sdkclient.WorkerDeploymentClient
-	execErr               error
-	describeDeploymentErr error
+	wdClient                   sdkclient.WorkerDeploymentClient
+	execErr                    error
+	describeDeploymentErr      error
+	describeDeploymentResponse *workflowservice.DescribeWorkerDeploymentResponse
 }
 
 func (s *stubTemporalClient) WorkerDeploymentClient() sdkclient.WorkerDeploymentClient {
@@ -256,7 +261,7 @@ func (s *stubTemporalClient) WorkerDeploymentClient() sdkclient.WorkerDeployment
 }
 
 func (s *stubTemporalClient) WorkflowService() workflowservice.WorkflowServiceClient {
-	return &stubWorkflowServiceClient{describeDeploymentErr: s.describeDeploymentErr}
+	return &stubWorkflowServiceClient{describeDeploymentErr: s.describeDeploymentErr, describeDeploymentResponse: s.describeDeploymentResponse}
 }
 
 func (s *stubTemporalClient) ExecuteWorkflow(_ context.Context, _ sdkclient.StartWorkflowOptions, _ interface{}, _ ...interface{}) (sdkclient.WorkflowRun, error) {

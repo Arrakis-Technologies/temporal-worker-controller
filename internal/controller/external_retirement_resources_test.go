@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -11,12 +12,14 @@ import (
 	api "github.com/temporalio/temporal-worker-controller/api/v1alpha1"
 	"github.com/temporalio/temporal-worker-controller/internal/k8s"
 	"github.com/temporalio/temporal-worker-controller/internal/planner"
+	"github.com/temporalio/temporal-worker-controller/internal/temporal"
 	apps "k8s.io/api/apps/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // Use the real planner and renderer so deletion authority must survive their
@@ -31,10 +34,7 @@ func retirementResourceFixtureFor(t *testing.T, pool string, builds []string) (*
 	worker := &api.WorkerDeployment{ObjectMeta: meta.ObjectMeta{Name: pool, Namespace: "test", UID: "pool-uid", Generation: 2}}
 	worker.Spec.SunsetStrategy = api.SunsetStrategy{RetirementPolicy: api.WorkerRetirementExternal, ScaledownDelay: &meta.Duration{}, DeleteDelay: &meta.Duration{}}
 	worker.Status.TargetVersion.BuildID = "A"
-	wrt := api.WorkerResourceTemplate{
-		ObjectMeta: meta.ObjectMeta{Name: "dependency", Namespace: "test", UID: "template-uid"},
-		Spec:       api.WorkerResourceTemplateSpec{WorkerDeploymentRef: &api.WorkerDeploymentReference{Name: pool}, Template: runtime.RawExtension{Raw: []byte(`{"apiVersion":"v1","kind":"ConfigMap","data":{"config":"required"}}`)}},
-	}
+	wrt := retirementTemplate(pool)
 	var resources []*unstructured.Unstructured
 	for _, build := range builds {
 		worker.Spec.SunsetStrategy.Retirements = append(worker.Spec.SunsetStrategy.Retirements, api.WorkerVersionRetirement{BuildID: build, RequestID: "job-" + build})
@@ -48,6 +48,33 @@ func retirementResourceFixtureFor(t *testing.T, pool string, builds []string) (*
 	require.NoError(t, err)
 	require.Len(t, p.DeleteWorkerResources, len(builds))
 	return worker, &plan{DeleteWorkerResources: p.DeleteWorkerResources}, resources
+}
+
+func retirementTemplate(pool string) api.WorkerResourceTemplate {
+	return api.WorkerResourceTemplate{
+		ObjectMeta: meta.ObjectMeta{Name: "dependency", Namespace: "test", UID: "template-uid"},
+		Spec:       api.WorkerResourceTemplateSpec{WorkerDeploymentRef: &api.WorkerDeploymentReference{Name: pool}, Template: runtime.RawExtension{Raw: []byte(`{"apiVersion":"v1","kind":"ConfigMap","data":{"config":"required"}}`)}},
+	}
+}
+
+func TestExternalRetirementSkipsFenceReadsForUnchangedResources(t *testing.T) {
+	worker, _, resources := retirementResourceFixture(t)
+	wrt := retirementTemplate(worker.Name)
+	reads := 0
+	r, _ := newTestReconcilerWithInterceptors([]client.Object{worker, &wrt}, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			if _, ok := object.(*api.WorkerDeployment); ok {
+				reads++
+			}
+			return c.Get(ctx, key, object, opts...)
+		},
+	})
+	p := &plan{WorkerDeploymentName: "test/pool", ApplyWorkerResources: []planner.WorkerResourceApply{
+		{WRTName: wrt.Name, WRTNamespace: wrt.Namespace, BuildID: "B", RenderError: errors.New("invalid template")},
+		{WRTName: wrt.Name, WRTNamespace: wrt.Namespace, BuildID: "C", Resource: resources[1], RenderedHash: "same", LastAppliedHash: "same"},
+	}}
+	require.Error(t, r.executePlan(context.Background(), logr.Discard(), worker, newStubTemporalClient(nil), p))
+	require.Equal(t, 1, reads, "render failures and unchanged resources need no additional retirement reads")
 }
 
 func TestExternalRetirementMatchesRenderedLongIdentity(t *testing.T) {
@@ -123,10 +150,45 @@ func TestExternalRetirementAcknowledgesBuildsIndependently(t *testing.T) {
 }
 
 func TestExternalRetirementDoesNotAcknowledgeDrainingBuild(t *testing.T) {
-	worker, _, _ := retirementResourceFixture(t)
-	worker.Status.DeprecatedVersions[0].Status = api.VersionStatusDraining
-	r, _ := newTestReconciler([]client.Object{worker})
-	require.NoError(t, r.acknowledgeRetirement(context.Background(), worker, &plan{}))
-	require.Equal(t, worker.Spec.SunsetStrategy.Retirements[1:], worker.Status.Retirement.RetiredVersions,
-		"loss of a Deployment must not turn a draining build into a completed retirement")
+	now, earlier := time.Now(), time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name    string
+		status  api.VersionStatus
+		since   *time.Time
+		blocked bool
+	}{
+		{"draining", api.VersionStatusDraining, nil, true},
+		{"drained without timestamp", api.VersionStatusDrained, nil, true},
+		{"scale-down grace", api.VersionStatusDrained, &now, true},
+		{"drainage finished", api.VersionStatusDrained, &earlier, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			worker, _, resources := retirementResourceFixture(t)
+			worker.Spec.SunsetStrategy.ScaledownDelay = &meta.Duration{Duration: time.Minute}
+			state := &k8s.DeploymentState{Deployments: map[string]*apps.Deployment{}}
+			temporalState := &temporal.TemporalWorkerState{CurrentBuildID: "A", Versions: map[string]*temporal.VersionInfo{
+				"A": {Status: api.VersionStatusCurrent}, "B": {Status: tc.status, DrainedSince: tc.since},
+			}}
+			worker.Status = *newStateMapper(state, temporalState, "test/pool").mapToStatus("A")
+			p, err := planner.GeneratePlan(logr.Discard(), state, &worker.Status, &worker.Spec, temporalState, api.ConnectionSpec{}, &planner.Config{}, "test/pool", 75, nil, false, []api.WorkerResourceTemplate{retirementTemplate(worker.Name)}, worker.Name, worker.UID)
+			require.NoError(t, err)
+			r, _ := newTestReconciler([]client.Object{worker, resources[0]})
+			planned := &plan{DeleteWorkerResources: p.DeleteWorkerResources}
+			require.NoError(t, r.executeK8sOperations(context.Background(), logr.Discard(), worker, planned))
+			got := resources[0].DeepCopy()
+			err = r.Get(context.Background(), client.ObjectKeyFromObject(got), got)
+			if tc.blocked {
+				require.NoError(t, err, "drainage dependencies must survive Deployment loss")
+			} else {
+				require.Error(t, err)
+				require.NoError(t, client.IgnoreNotFound(err))
+			}
+			require.NoError(t, r.acknowledgeRetirement(context.Background(), worker, planned))
+			if tc.blocked {
+				require.Equal(t, worker.Spec.SunsetStrategy.Retirements[1:], worker.Status.Retirement.RetiredVersions)
+			} else {
+				require.Equal(t, worker.Spec.SunsetStrategy.Retirements, worker.Status.Retirement.RetiredVersions)
+			}
+		})
+	}
 }
