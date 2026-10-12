@@ -23,6 +23,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -140,7 +141,17 @@ func (r *WorkerDeploymentReconciler) executeK8sOperations(ctx context.Context, l
 			if d.UID == "" || d.ResourceVersion == "" {
 				return fmt.Errorf("external retirement scale lacks UID/resourceVersion fence")
 			}
-			scale.ObjectMeta = metav1.ObjectMeta{UID: d.UID, ResourceVersion: d.ResourceVersion}
+			var current appsv1.Deployment
+			if err := r.retirementReader().Get(ctx, client.ObjectKeyFromObject(dep), &current); err != nil {
+				return err
+			}
+			if current.UID != d.UID || current.DeletionTimestamp != nil {
+				return apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, d.Name,
+					fmt.Errorf("external retirement scale Deployment became stale"))
+			}
+			// Refresh only the same object's version. Never adopt a replacement UID.
+			dep.ResourceVersion = current.ResourceVersion
+			scale.ObjectMeta = metav1.ObjectMeta{UID: d.UID, ResourceVersion: current.ResourceVersion}
 		}
 		if err := r.Client.SubResource("scale").Update(ctx, dep, client.WithSubResourceBody(scale)); err != nil {
 			l.Error(err, "unable to scale deployment", "deployment", d, "replicas", replicas)
