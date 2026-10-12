@@ -6,12 +6,28 @@ import (
 
 	api "github.com/temporalio/temporal-worker-controller/api/v1alpha1"
 	"github.com/temporalio/temporal-worker-controller/internal/k8s"
+	"github.com/temporalio/temporal-worker-controller/internal/planner"
 	apps "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// A fresh GET plus UID preconditions protects against replacement after the GET.
+// Expected ownership and build identity also protect replacement before the GET.
+func retirementResourceMatches(ref planner.WorkerResourceRef, object client.Object, workerName string) (bool, error) {
+	if ref.BuildID == "" || ref.WRTUID == "" || ref.WRTName == "" {
+		return false, fmt.Errorf("external retirement resource %s/%s lacks expected owner/build identity", ref.Namespace, ref.Name)
+	}
+	owner := meta.GetControllerOf(object)
+	labels := k8s.ComputeSelectorLabels(workerName, ref.BuildID)
+	return owner != nil && owner.UID == ref.WRTUID && owner.Name == ref.WRTName &&
+		owner.APIVersion == api.GroupVersion.String() && owner.Kind == "WorkerResourceTemplate" &&
+		object.GetLabels()[k8s.BuildIDLabel] == labels[k8s.BuildIDLabel] &&
+		object.GetLabels()[k8s.WorkerDeploymentNameLabel] == labels[k8s.WorkerDeploymentNameLabel], nil
+}
 
 func (r *WorkerDeploymentReconciler) retirementReader() client.Reader {
 	if r.APIReader != nil {
@@ -53,17 +69,22 @@ func (r *WorkerDeploymentReconciler) acknowledgeRetirement(ctx context.Context, 
 	}
 	status := &api.WorkerRetirementStatus{Policy: api.WorkerRetirementExternal, ObservedGeneration: worker.Generation}
 	var deployments apps.DeploymentList
-	if err := r.retirementReader().List(ctx, &deployments, client.InNamespace(worker.Namespace), client.MatchingLabels{k8s.WorkerDeploymentNameLabel: worker.Name}); err != nil {
+	poolLabel := k8s.ComputeSelectorLabels(worker.Name, "")[k8s.WorkerDeploymentNameLabel]
+	if err := r.retirementReader().List(ctx, &deployments, client.InNamespace(worker.Namespace), client.MatchingLabels{k8s.WorkerDeploymentNameLabel: poolLabel}); err != nil {
 		return err
 	}
 	for _, request := range worker.Spec.SunsetStrategy.Retirements {
 		absent := true
+		buildLabel := k8s.ComputeSelectorLabels(worker.Name, request.BuildID)[k8s.BuildIDLabel]
 		for _, deployment := range deployments.Items {
-			if deployment.Labels[k8s.BuildIDLabel] == request.BuildID {
+			if deployment.Labels[k8s.BuildIDLabel] == buildLabel {
 				absent = false
 			}
 		}
 		for _, ref := range p.DeleteWorkerResources {
+			if ref.BuildID != request.BuildID {
+				continue
+			}
 			object := &unstructured.Unstructured{}
 			gv, err := schema.ParseGroupVersion(ref.APIVersion)
 			if err != nil {
@@ -72,21 +93,21 @@ func (r *WorkerDeploymentReconciler) acknowledgeRetirement(ctx context.Context, 
 			object.SetGroupVersionKind(gv.WithKind(ref.Kind))
 			err = r.retirementReader().Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, object)
 			if err == nil {
-				absent = false
+				matches, err := retirementResourceMatches(ref, object, worker.Name)
+				if err != nil {
+					return err
+				}
+				if matches {
+					absent = false
+				}
 			} else if !apierrors.IsNotFound(err) {
 				return err
 			}
 		}
 		// Routed/target requests are never acknowledged even if their creator
 		// is missing. Only the external owner can repair/remove an invalid request.
-		if worker.Status.TargetVersion.BuildID == request.BuildID ||
-			(worker.Status.CurrentVersion != nil && worker.Status.CurrentVersion.BuildID == request.BuildID) {
+		if request.RequestID == "" || planner.RetirementBlocked(&worker.Status, &worker.Spec, request.BuildID) {
 			absent = false
-		}
-		for _, version := range worker.Status.DeprecatedVersions {
-			if version.BuildID == request.BuildID && (version.Status == api.VersionStatusCurrent || version.Status == api.VersionStatusRamping) {
-				absent = false
-			}
 		}
 		if absent {
 			status.RetiredVersions = append(status.RetiredVersions, request)

@@ -5,12 +5,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	api "github.com/temporalio/temporal-worker-controller/api/v1alpha1"
 	"github.com/temporalio/temporal-worker-controller/internal/k8s"
 	apps "k8s.io/api/apps/v1"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // Exercise the same wire decoder and planner used in reconciliation. The wire
@@ -40,6 +42,37 @@ func TestExternalRetirementSavedBuildSurvivesReusedSuccessor(t *testing.T) {
 	require.Empty(t, getDeleteDeployments(state, status, &spec, true), "saved B must survive zero-replica bootstrap")
 	status.DeprecatedVersions[0].Status = api.VersionStatusNotRegistered
 	require.Empty(t, getDeleteDeployments(state, status, &spec, true), "transient registration loss must not erase saved B")
+}
+
+func TestExternalRetirementPreservesDrainingDependencies(t *testing.T) {
+	one := int32(1)
+	deployment := &apps.Deployment{ObjectMeta: meta.ObjectMeta{Name: "pool-b", Namespace: "test", Labels: map[string]string{k8s.BuildIDLabel: "B"}}, Spec: apps.DeploymentSpec{Replicas: &one}}
+	state := &k8s.DeploymentState{Deployments: map[string]*apps.Deployment{"B": deployment}}
+	status := &api.WorkerDeploymentStatus{
+		TargetVersion:      api.TargetWorkerDeploymentVersion{BaseWorkerDeploymentVersion: api.BaseWorkerDeploymentVersion{BuildID: "A"}},
+		DeprecatedVersions: []*api.DeprecatedWorkerDeploymentVersion{{BaseWorkerDeploymentVersion: api.BaseWorkerDeploymentVersion{BuildID: "B", Status: api.VersionStatusDraining, Deployment: &core.ObjectReference{Name: "pool-b", Namespace: "test"}}}},
+	}
+	spec := &api.WorkerDeploymentSpec{SunsetStrategy: api.SunsetStrategy{RetirementPolicy: api.WorkerRetirementExternal, ScaledownDelay: &meta.Duration{}, DeleteDelay: &meta.Duration{}, Retirements: []api.WorkerVersionRetirement{{BuildID: "B", RequestID: "job-b"}}}}
+	wrt := api.WorkerResourceTemplate{ObjectMeta: meta.ObjectMeta{Name: "service", Namespace: "test", UID: "template-uid"}, Spec: api.WorkerResourceTemplateSpec{WorkerDeploymentRef: &api.WorkerDeploymentReference{Name: "pool"}, Template: runtime.RawExtension{Raw: []byte(`{"apiVersion":"v1","kind":"Service","spec":{"selector":{}}}`)}}}
+	makePlan := func() *Plan {
+		p, err := GeneratePlan(logr.Discard(), state, status, spec, nil, api.ConnectionSpec{}, &Config{}, "test.pool", 75, nil, false, []api.WorkerResourceTemplate{wrt}, "pool", "pool-uid")
+		require.NoError(t, err)
+		return p
+	}
+	p := makePlan()
+	require.Empty(t, p.DeleteWorkerResources, "running workflows still need their attached Service")
+	require.Len(t, p.ApplyWorkerResources, 1, "draining dependency must remain reconciled")
+	require.Empty(t, p.ScaleDeployments)
+	status.DeprecatedVersions[0].Status = api.VersionStatusDrained
+	status.DeprecatedVersions[0].DrainedSince = &meta.Time{Time: time.Now()}
+	spec.SunsetStrategy.ScaledownDelay = &meta.Duration{Duration: time.Hour}
+	require.Empty(t, makePlan().DeleteWorkerResources, "respect the existing drainage grace period")
+	spec.SunsetStrategy.ScaledownDelay = &meta.Duration{}
+	status.DeprecatedVersions[0].DrainedSince = &meta.Time{Time: time.Now().Add(-time.Hour)}
+	p = makePlan()
+	require.Len(t, p.DeleteWorkerResources, 1, "remove dependencies after drainage")
+	require.Empty(t, p.ApplyWorkerResources, "never recreate resources being removed")
+	require.Equal(t, uint32(0), p.ScaleDeployments[status.DeprecatedVersions[0].Deployment])
 }
 
 func TestExternalRetirementAuthorizationAndRouting(t *testing.T) {

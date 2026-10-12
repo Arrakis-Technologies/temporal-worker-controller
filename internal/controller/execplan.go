@@ -94,7 +94,18 @@ func (r *WorkerDeploymentReconciler) executeK8sOperations(ctx context.Context, l
 			if err := r.checkRetirementPlan(ctx, workerDeploy); err != nil {
 				return err
 			}
+			matches, err := retirementResourceMatches(res, obj, workerDeploy.Name)
+			if err != nil {
+				return err
+			}
+			if !matches {
+				l.Info("preserving foreign worker resource", "name", res.Name, "kind", res.Kind)
+				continue
+			}
 			uid, version := obj.GetUID(), obj.GetResourceVersion()
+			if uid == "" || version == "" {
+				return fmt.Errorf("external retirement resource lacks UID/resourceVersion fence")
+			}
 			options = append(options, client.Preconditions{UID: &uid, ResourceVersion: &version})
 		}
 		if err := r.Delete(ctx, obj, options...); client.IgnoreNotFound(err) != nil {
