@@ -52,6 +52,8 @@ func main() {
 	var webhookCertName string
 	var webhookKeyName string
 	wrtHPAMatchLabelsStripTemporalPrefix := config.GetWRTHPAMatchLabelsStripTemporalPrefix()
+	var maxConcurrentReconciles int
+	var reconcileInterval time.Duration
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -74,11 +76,27 @@ func main() {
 		wrtHPAMatchLabelsStripTemporalPrefix,
 		"Remove the temporal_ prefix from auto-injected WorkerResourceTemplate HPA external metric matchLabels.",
 	)
+	flag.IntVar(
+		&maxConcurrentReconciles,
+		"max-concurrent-reconciles",
+		config.DefaultMaxConcurrentReconciles,
+		"Maximum number of WorkerDeployment reconciliations allowed to run concurrently.",
+	)
+	flag.DurationVar(
+		&reconcileInterval,
+		"reconcile-interval",
+		config.DefaultReconcileInterval,
+		"Interval between successful WorkerDeployment reconciliations.",
+	)
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	if err := validateControllerSettings(maxConcurrentReconciles, reconcileInterval); err != nil {
+		setupLog.Error(err, "invalid controller settings")
+		os.Exit(1)
+	}
 
 	if watchNamespaces == "" {
 		watchNamespaces = os.Getenv("WATCH_NAMESPACES")
@@ -170,6 +188,8 @@ func main() {
 		controller.WithDisableDeprecatedTWD(!deprecatedCRDWatches.TemporalWorkerDeployments),
 		controller.WithDisableClusterConnections(namespaceScoped),
 		controller.WithWRTHPAMatchLabelsStripTemporalPrefix(wrtHPAMatchLabelsStripTemporalPrefix),
+		controller.WithMaxConcurrentReconciles(maxConcurrentReconciles),
+		controller.WithReconcileInterval(reconcileInterval),
 	)
 	if err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "WorkerDeployment")
@@ -177,6 +197,13 @@ func main() {
 	}
 	if err = c.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "WorkerDeployment")
+		os.Exit(1)
+	}
+	if err = (&internalcontroller.ConnectionFinalizerReconciler{
+		Client:            mgr.GetClient(),
+		IncludeDeprecated: deprecatedCRDWatches.TemporalWorkerDeployments,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ConnectionFinalizer")
 		os.Exit(1)
 	}
 	if deprecatedCRDWatches.TemporalWorkerDeployments {
@@ -242,4 +269,14 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func validateControllerSettings(maxConcurrentReconciles int, reconcileInterval time.Duration) error {
+	if maxConcurrentReconciles < 1 {
+		return fmt.Errorf("max-concurrent-reconciles must be at least 1")
+	}
+	if reconcileInterval <= 0 {
+		return fmt.Errorf("reconcile-interval must be greater than zero")
+	}
+	return nil
 }

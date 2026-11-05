@@ -7,10 +7,16 @@ package config
 import (
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/temporalio/temporal-worker-controller/internal/controller/clientpool"
 	sdkclient "go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/log"
+)
+
+const (
+	DefaultMaxConcurrentReconciles = 100
+	DefaultReconcileInterval       = 10 * time.Second
 )
 
 // Option configures a controller built by New.
@@ -46,6 +52,14 @@ type Config struct {
 	DisableClusterConnections bool
 	// Disables panic recovery if true
 	DisableRecoverPanic bool
+	// MaxConcurrentReconciles bounds the number of WorkerDeployment
+	// reconciliations that may call Temporal concurrently. Values less than
+	// one use DefaultMaxConcurrentReconciles.
+	MaxConcurrentReconciles int
+	// ReconcileInterval controls how soon a successful WorkerDeployment
+	// reconciliation is checked again. Values less than or equal to zero use
+	// DefaultReconcileInterval.
+	ReconcileInterval time.Duration
 	// WRTHPAMatchLabelsStripTemporalPrefix removes the "temporal_" prefix from
 	// controller-managed external metric matchLabels in rendered
 	// WorkerResourceTemplates.
@@ -102,6 +116,20 @@ func WithDefaultClient(customize ...func(sdkclient.Options) sdkclient.Options) O
 func WithMaxDeploymentVersionsIneligibleForDeletion(n int32) Option {
 	return func(c *Config) {
 		c.MaxDeploymentVersionsIneligibleForDeletion = n
+	}
+}
+
+// WithMaxConcurrentReconciles bounds concurrent WorkerDeployment reconciliations.
+func WithMaxConcurrentReconciles(n int) Option {
+	return func(c *Config) {
+		c.MaxConcurrentReconciles = n
+	}
+}
+
+// WithReconcileInterval sets the requeue interval after a successful reconcile.
+func WithReconcileInterval(d time.Duration) Option {
+	return func(c *Config) {
+		c.ReconcileInterval = d
 	}
 }
 

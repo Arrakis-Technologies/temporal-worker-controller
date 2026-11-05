@@ -424,13 +424,35 @@ func (r *WorkerDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
+	return r.successfulReconcileResult(), nil
+}
+
+func (r *WorkerDeploymentReconciler) maxConcurrentReconciles() int {
+	if r.Config.MaxConcurrentReconciles > 0 {
+		return r.Config.MaxConcurrentReconciles
+	}
+	return config.DefaultMaxConcurrentReconciles
+}
+
+func (r *WorkerDeploymentReconciler) reconcileInterval() time.Duration {
+	if r.Config.ReconcileInterval > 0 {
+		return r.Config.ReconcileInterval
+	}
+	return config.DefaultReconcileInterval
+}
+
+func (r *WorkerDeploymentReconciler) controllerOptions(recoverPanic *bool) controller.Options {
+	return controller.Options{
+		MaxConcurrentReconciles: r.maxConcurrentReconciles(),
+		RecoverPanic:            recoverPanic,
+	}
+}
+
+func (r *WorkerDeploymentReconciler) successfulReconcileResult() ctrl.Result {
 	return ctrl.Result{
-		Requeue: true,
-		// TODO(jlegrone): Consider increasing this value if the only thing we need to check for is unreachable versions.
-		RequeueAfter: 10 * time.Second,
-		// For demo purposes only!
-		//RequeueAfter: 1 * time.Second,
-	}, nil
+		Requeue:      true,
+		RequeueAfter: r.reconcileInterval(),
+	}
 }
 
 // migrateFromDeprecatedTWD checks for a TemporalWorkerDeployment stub with the
@@ -972,10 +994,7 @@ func (r *WorkerDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}))
 	}
 	return builder.
-		WithOptions(controller.Options{
-			MaxConcurrentReconciles: 100,
-			RecoverPanic:            &recoverPanic,
-		}).
+		WithOptions(r.controllerOptions(&recoverPanic)).
 		Complete(r)
 }
 
